@@ -79,6 +79,8 @@ public class SyncReaderImpl extends ReaderImpl implements SyncReader {
             throw new RuntimeException("Reader was stopped");
         }
 
+        final Message result;
+
         queueLock.lock();
 
         try {
@@ -103,7 +105,7 @@ public class SyncReaderImpl extends ReaderImpl implements SyncReader {
 
             logger.trace("Taking a message with index {} from batch", currentMessageIndex);
             MessageBatchWrapper currentBatch = batchesInQueue.element();
-            Message result = currentBatch.messages.get(currentMessageIndex);
+            result = currentBatch.messages.get(currentMessageIndex);
             currentMessageIndex++;
             if (currentMessageIndex >= currentBatch.messages.size()) {
                 logger.debug("Batch is read. signalling core reader impl");
@@ -111,26 +113,30 @@ public class SyncReaderImpl extends ReaderImpl implements SyncReader {
                 currentMessageIndex = 0;
                 currentBatch.future.complete(null);
             }
-            if (receiveSettings.getTransaction() != null) {
-                // TODO: Implement batching for message committing
-                List<PartitionOffsets> offsets = Collections.singletonList(new PartitionOffsets(
-                        result.getPartitionSession(),
-                        Collections.singletonList(result.getRangeToCommit())
-                ));
-                Status updateStatus = updateOffsetsInTransaction(
-                        receiveSettings.getTransaction(),
-                        Collections.singletonMap(result.getPartitionSession().getPath(), offsets),
-                        UpdateOffsetsInTransactionSettings.newBuilder().build()
-                ).join();
-                if (!updateStatus.isSuccess()) {
-                    throw new RuntimeException("Couldn't add message offset " + result.getOffset() + " to transaction "
-                            + receiveSettings.getTransaction().getId() + ": " + updateStatus);
-                }
-            }
-            return result;
         } finally {
             queueLock.unlock();
         }
+
+        // Updating offsets is a server round trip. Doing it under queueLock would block
+        // handleDataReceivedEvent, and with it the delivery of every partition of this reader.
+        if (receiveSettings.getTransaction() != null) {
+            // TODO: Implement batching for message committing
+            List<PartitionOffsets> offsets = Collections.singletonList(new PartitionOffsets(
+                    result.getPartitionSession(),
+                    Collections.singletonList(result.getRangeToCommit())
+            ));
+            Status updateStatus = updateOffsetsInTransaction(
+                    receiveSettings.getTransaction(),
+                    Collections.singletonMap(result.getPartitionSession().getPath(), offsets),
+                    UpdateOffsetsInTransactionSettings.newBuilder().build()
+            ).join();
+            if (!updateStatus.isSuccess()) {
+                throw new RuntimeException("Couldn't add message offset " + result.getOffset() + " to transaction "
+                        + receiveSettings.getTransaction().getId() + ": " + updateStatus);
+            }
+        }
+
+        return result;
     }
 
     @Override
@@ -166,7 +172,9 @@ public class SyncReaderImpl extends ReaderImpl implements SyncReader {
         try {
             logger.debug("Putting a message batch into queue and notifying in case receive method is waiting");
             batchesInQueue.add(new MessageBatchWrapper(event.getMessages(), resultFuture));
-            queueIsNotEmptyCondition.signal();
+            // a batch holds several messages and can feed several waiting readers, and signal() would
+            // leave all but one of them waiting until their own timeout expires
+            queueIsNotEmptyCondition.signalAll();
         } finally {
             queueLock.unlock();
         }
