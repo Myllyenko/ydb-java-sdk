@@ -6,7 +6,6 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.EnumSet;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
@@ -70,13 +69,12 @@ public class StaticCredentials implements AuthRpcProvider<GrpcAuthRpc> {
 
     private class LoginRpc implements BackgroundIdentity.Rpc {
         private final GrpcAuthRpc rpc;
-        private final AtomicInteger retries = new AtomicInteger(MAX_RETRIES_COUNT);
 
         LoginRpc(GrpcAuthRpc rpc) {
             this.rpc = rpc;
         }
 
-        private void handleResult(CompletableFuture<Token> future, Result<YdbAuth.LoginResult> resp) {
+        private void handleResult(CompletableFuture<Token> future, Result<YdbAuth.LoginResult> resp, int retriesLeft) {
             if (resp.isSuccess()) {
                 try {
                     Instant now = clock.instant();
@@ -94,24 +92,24 @@ public class StaticCredentials implements AuthRpcProvider<GrpcAuthRpc> {
                 }
             } else {
                 logger.error("Login request get wrong status {}", resp.getStatus());
-                if (RETRYABLE_STATUSES.contains(resp.getStatus().getCode()) && retries.decrementAndGet() > 0) {
-                    tryLogin(future);
+                if (RETRYABLE_STATUSES.contains(resp.getStatus().getCode()) && retriesLeft - 1 > 0) {
+                    tryLogin(future, retriesLeft - 1);
                 } else {
                     future.completeExceptionally(new UnexpectedResultException("Can't login", resp.getStatus()));
                 }
             }
         }
 
-        private void handleException(CompletableFuture<Token> future, Throwable th) {
+        private void handleException(CompletableFuture<Token> future, Throwable th, int retriesLeft) {
             logger.error("Login request get exception {}", th.getMessage());
-            if (retries.decrementAndGet() > 0) {
-                tryLogin(future);
+            if (retriesLeft > 1) {
+                tryLogin(future, retriesLeft - 1);
             } else {
                 future.completeExceptionally(th);
             }
         }
 
-        private void tryLogin(CompletableFuture<Token> future) {
+        private void tryLogin(CompletableFuture<Token> future, int retriesLeft) {
             if (future.isCancelled() || future.isDone()) {
                 return;
             }
@@ -129,10 +127,10 @@ public class StaticCredentials implements AuthRpcProvider<GrpcAuthRpc> {
                             ))
                             .whenComplete((resp, th) -> {
                                 if (resp != null) {
-                                    handleResult(future, resp);
+                                    handleResult(future, resp, retriesLeft);
                                 }
                                 if (th != null) {
-                                    handleException(future, th);
+                                    handleException(future, th, retriesLeft);
                                 }
                             })
                             .join();
@@ -149,7 +147,7 @@ public class StaticCredentials implements AuthRpcProvider<GrpcAuthRpc> {
                 }
             });
 
-            tryLogin(tokenFuture);
+            tryLogin(tokenFuture, MAX_RETRIES_COUNT);
             return tokenFuture;
         }
 

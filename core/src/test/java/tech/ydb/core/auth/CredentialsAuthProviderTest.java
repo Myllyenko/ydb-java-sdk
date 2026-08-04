@@ -131,6 +131,48 @@ public class CredentialsAuthProviderTest {
     }
 
     @Test
+    public void retryBudgetIsPerLoginTest() {
+        Duration expireTime = Duration.ofHours(2);
+        Instant firstHour = now.plus(Duration.ofHours(1));
+        Instant secondHour = now.plus(Duration.ofHours(2));
+
+        String token1 = JwtBuilder.create(now.plus(expireTime), now);
+        String token2 = JwtBuilder.create(firstHour.plus(expireTime), firstHour);
+        String token3 = JwtBuilder.create(secondHour.plus(expireTime), secondHour);
+
+        Status unavailable = Status.of(StatusCode.UNAVAILABLE);
+
+        Mockito.when(transport.unaryCall(
+                Mockito.eq(AuthServiceGrpc.getLoginMethod()), Mockito.any(), Mockito.any()))
+                .thenReturn(CompletableFuture.completedFuture(Result.success(responseOk(token1))))
+                // the first refresh needs three retries
+                .thenReturn(CompletableFuture.completedFuture(Result.fail(unavailable)))
+                .thenReturn(CompletableFuture.completedFuture(Result.fail(unavailable)))
+                .thenReturn(CompletableFuture.completedFuture(Result.fail(unavailable)))
+                .thenReturn(CompletableFuture.completedFuture(Result.success(responseOk(token2))))
+                // and the second one needs three more, exceeding MAX_RETRIES_COUNT in total
+                .thenReturn(CompletableFuture.completedFuture(Result.fail(unavailable)))
+                .thenReturn(CompletableFuture.completedFuture(Result.fail(unavailable)))
+                .thenReturn(CompletableFuture.completedFuture(Result.fail(unavailable)))
+                .thenReturn(CompletableFuture.completedFuture(Result.success(responseOk(token3))));
+
+        Mockito.when(clock.instant()).thenReturn(now);
+
+        try (tech.ydb.auth.AuthIdentity identity = createAuth("user", "password")) {
+            Assert.assertEquals(token1, identity.getToken());
+
+            Mockito.when(clock.instant()).thenReturn(firstHour.plusMillis(5));
+            Assert.assertEquals(token1, identity.getToken());
+            Assert.assertEquals(token2, identity.getToken());
+
+            Mockito.when(clock.instant()).thenReturn(secondHour.plusMillis(10));
+            Assert.assertEquals(token2, identity.getToken());
+            // retries spent on the previous refresh must not count against this one
+            Assert.assertEquals(token3, identity.getToken());
+        }
+    }
+
+    @Test
     public void refreshTokenTest() {
         Status unavailable = Status.of(StatusCode.UNAVAILABLE);
 
