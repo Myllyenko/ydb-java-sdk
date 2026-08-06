@@ -6,6 +6,8 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
@@ -175,6 +177,63 @@ public class YdbDiscoveryTest {
         Assert.assertTrue(req3.join());
         Assert.assertTrue(req4.join());
 
+        discovery.stop();
+    }
+
+    /**
+     * Applying a new endpoint list may measure latencies between datacenters and open grpc channels.
+     * While that happens, a thread calling waitReady must not be stuck on the discovery lock: it would
+     * wait for the whole endpoint update no matter which timeout it asked for.
+     */
+    @Test(timeout = 60_000)
+    public void waitReadyKeepsItsTimeoutWhileEndpointsAreApplied() throws Exception {
+        Mockito.when(channel.newCall(Mockito.eq(DiscoveryServiceGrpc.getListEndpointsMethod()), Mockito.any()))
+                .thenReturn(MockedCall.discovery("self", new EndpointRecord("localhost", 12340)));
+
+        CountDownLatch applying = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+
+        TestHandler handler = new TestHandler() {
+            @Override
+            public CompletableFuture<Boolean> handleEndpoints(List<EndpointRecord> endpoints, String selfLocation) {
+                applying.countDown();
+                try {
+                    Assert.assertTrue(release.await(30, TimeUnit.SECONDS));
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+                return CompletableFuture.completedFuture(Boolean.TRUE);
+            }
+        };
+
+        YdbDiscovery discovery = new YdbDiscovery(handler, scheduler, "/slow", Duration.ofSeconds(30));
+        discovery.start();
+        scheduler.hasTasksCount(1);
+
+        // this thread parks on the discovery condition before the first answer arrives
+        CompletableFuture<Long> waiting = CompletableFuture.supplyAsync(() -> {
+            long startedAt = System.nanoTime();
+            try {
+                discovery.waitReady(2_000);
+            } catch (IllegalStateException ex) {
+                // expected when the endpoints are not applied yet
+            }
+            return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        });
+        Thread.sleep(500);
+
+        // the discovery answer is handled on another thread, which gets stuck inside handleEndpoints
+        CompletableFuture<Void> discoveryTick = CompletableFuture.runAsync(scheduler::runNextTask);
+        Assert.assertTrue(applying.await(20, TimeUnit.SECONDS));
+
+        long waitedMillis = waiting.get(40, TimeUnit.SECONDS);
+        Assert.assertTrue("waitReady(2000) returned only after " + waitedMillis
+                + " ms, so it was held up until the endpoints had been applied", waitedMillis < 10_000);
+
+        release.countDown();
+        discoveryTick.get(20, TimeUnit.SECONDS);
+
+        discovery.waitReady(-1);
         discovery.stop();
     }
 

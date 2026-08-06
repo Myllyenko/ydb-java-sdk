@@ -193,16 +193,24 @@ public class YdbDiscovery {
     }
 
     private void handleOk(String selfLocation, List<EndpointRecord> endpoints) {
+        // Applying the new endpoint list is not a cheap operation: it may measure latencies to detect the
+        // local datacenter and it creates grpc channels. Doing it under readyLock would hold up every
+        // thread parked in waitReady, including threads that are only waiting to pick an endpoint.
+        // The pool has to be updated before isStarted is published, or a released waiter could find the
+        // pool still empty.
+        CompletableFuture<Boolean> applied = handler.handleEndpoints(endpoints, selfLocation);
+
         readyLock.lock();
 
         try {
             isStarted = true;
             lastException = null;
-            handler.handleEndpoints(endpoints, selfLocation).whenComplete((res, th) -> scheduleNextTick());
             readyCondition.signalAll();
         } finally {
             readyLock.unlock();
         }
+
+        applied.whenComplete((res, th) -> scheduleNextTick());
     }
 
     private static String createAddress(EndpointInfo e) {
