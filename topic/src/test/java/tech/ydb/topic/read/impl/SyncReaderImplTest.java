@@ -197,7 +197,32 @@ public class SyncReaderImplTest {
     }
 
     @Test
-    @HideLoggers({ BufferManager.class, ReaderImpl.class })
+    public void shutdownReleasesQueuedMessagesTest() throws InterruptedException {
+        ReadStreamMock mock = new ReadStreamMock();
+
+        ReaderSettings settings = ReaderSettings.newBuilder()
+                .addTopic(TopicReadSettings.newBuilder().setPath("/test-topic").build())
+                .setConsumerName("consumer")
+                .build();
+
+        SyncReaderImpl reader = new SyncReaderImpl(mockRpc(mock), settings, REGISTRY);
+        reader.init();
+
+        mock.responseInit("read-session-1");
+        mock.responseStartPartition("/test-topic", 123, 0);
+        mock.responseData(10000).partition(1, 0).batch(Codec.RAW, MSG1, MSG2, MSG3, MSG4, MSG5).and().send();
+
+        Assert.assertArrayEquals(MSG1, reader.receive().getData());
+        Assert.assertEquals(4, reader.getQueueSize());
+
+        reader.shutdown();
+        Assert.assertEquals(0, reader.getQueueSize());
+
+        mock.closeStream(Status.SUCCESS);
+    }
+
+    @Test
+    @HideLoggers({ BufferManager.class, ReadPartition.class })
     public void invalidBatchesTest() throws InterruptedException {
         ReadStreamMock mock = new ReadStreamMock();
 

@@ -119,6 +119,11 @@ public class BufferManager {
     }
 
     // Thread safe
+    public void clear() {
+        partitions.clear();
+    }
+
+    // Thread safe
     public void releaseRange(Long id, OffsetsRange range) {
         PartitionBuffer part = partitions.get(id);
         if (part != null) {

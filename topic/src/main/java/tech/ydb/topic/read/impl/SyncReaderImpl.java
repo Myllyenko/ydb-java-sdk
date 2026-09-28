@@ -16,6 +16,7 @@ import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -114,7 +115,13 @@ public class SyncReaderImpl implements SyncReader {
         shutdownFuture.complete(status);
 
         decompressor.close();
+        queue.clear(); // messages will never be received, don't retain them
         wakeUp();
+    }
+
+    @VisibleForTesting
+    int getQueueSize() {
+        return queue.size();
     }
 
     private void wakeUp() {

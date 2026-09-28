@@ -184,6 +184,22 @@ public class BufferManagerTest {
     }
 
     @Test
+    public void clearTest() {
+        Resource resource = new Resource();
+        BufferManager bufferManager = new BufferManager("trace-7", 1000, resource);
+
+        bufferManager.allocate(500, Arrays.asList(partition(1, batch(0, 100, 100)), partition(2, batch(0, 300))));
+        resource.assertCalls(0, 0);
+
+        bufferManager.clear();
+
+        // cleared buffers are not tracked anymore, so releasing them doesn't request new data
+        bufferManager.releaseRange(1L, OffsetsRange.of(0, 2));
+        bufferManager.releasePartition(2L);
+        resource.assertCalls(0, 0);
+    }
+
+    @Test
     public void skippedOffsetsInBatchTest() {
         AtomicLong requested = new AtomicLong(0);
         BufferManager bm = new BufferManager("skipped-offsets", 100, requested::addAndGet);

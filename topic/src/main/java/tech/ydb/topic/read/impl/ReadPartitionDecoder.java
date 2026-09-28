@@ -7,6 +7,7 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.ByteStreams;
 import com.google.protobuf.ByteString;
 import org.slf4j.Logger;
@@ -24,8 +25,8 @@ import tech.ydb.topic.read.PartitionSession;
  *
  * @author Aleksandr Gorshenin {@literal <alexandr268@ydb.tech>}
  */
-public class ReadPartitionDecoder {
-    private static final Logger logger = LoggerFactory.getLogger(MessageDecoder.class);
+class ReadPartitionDecoder {
+    private static final Logger logger = LoggerFactory.getLogger(ReadPartition.class);
 
     private final String traceID;
     private final PartitionSession partition;
@@ -37,7 +38,7 @@ public class ReadPartitionDecoder {
     private final Queue<EncodedMessage> allocatedMessages = new ConcurrentLinkedQueue<>();
     private volatile boolean isStopped = false;
 
-    public ReadPartitionDecoder(String traceId, MessageDecoder decoder, PartitionSession partition,
+    ReadPartitionDecoder(String traceId, MessageDecoder decoder, PartitionSession partition,
             MessageCommitter committer, Runnable readyHandler) {
         this.traceID = traceId;
         this.decoder = decoder;
@@ -46,13 +47,17 @@ public class ReadPartitionDecoder {
         this.readyHandler = readyHandler;
     }
 
-    public MessageImpl decode(BatchMeta m, OffsetsRange r, YdbTopic.StreamReadMessage.ReadResponse.MessageData msg) {
+    MessageImpl decode(BatchMeta m, OffsetsRange r, YdbTopic.StreamReadMessage.ReadResponse.MessageData msg) {
+        if (m.getCodec() == Codec.RAW) {
+            return new RawMessage(m, r, msg);
+        }
+
         EncodedMessage encoded = new EncodedMessage(m, r, msg);
         decoder.add(encoded);
         return encoded;
     }
 
-    public void releaseRange(OffsetsRange range) {
+    void releaseRange(OffsetsRange range) {
         long released = 0;
         Iterator<EncodedMessage> it = allocatedMessages.iterator();
         while (it.hasNext()) {
@@ -82,13 +87,19 @@ public class ReadPartitionDecoder {
         }
     }
 
-    public void close() {
+    void close() {
         isStopped = true;
         release();
     }
 
     private void release() {
+        allocatedMessages.clear(); // messages of the stopped partition will never be read, don't retain them
         decoder.free(allocatedTotal.getAndSet(0));
+    }
+
+    @VisibleForTesting
+    int getAllocatedCount() {
+        return allocatedMessages.size();
     }
 
     private void notifyReady() {
@@ -99,7 +110,26 @@ public class ReadPartitionDecoder {
         }
     }
 
-    public class EncodedMessage extends MessageImpl  {
+    private class RawMessage extends MessageImpl {
+        private final byte[] data;
+
+        RawMessage(BatchMeta meta, OffsetsRange range, YdbTopic.StreamReadMessage.ReadResponse.MessageData msg) {
+            super(partition, committer, meta, range, msg);
+            this.data = msg.getData().toByteArray();
+        }
+
+        @Override
+        public byte[] getData() {
+            return data;
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+    }
+
+    class EncodedMessage extends MessageImpl  {
         private final int codecCode;
         private final long uncompressedSize;
         private ByteString origin;
@@ -142,7 +172,7 @@ public class ReadPartitionDecoder {
 
         public long allocate() {
             if (isStopped) {
-                problem = new IOException("" + getPartitionSession() + " is already closed");
+                problem = new IOException(getPartitionSession() + " is already closed");
                 isReady = true;
                 return 0;
             }

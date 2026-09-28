@@ -48,6 +48,7 @@ public class MessageDecoder {
 
     public void stop() {
         this.isStopped = true;
+        decodingQueue.clear(); // pending messages will never be decoded, don't retain their data
     }
 
     @VisibleForTesting
@@ -55,8 +56,17 @@ public class MessageDecoder {
         return totalAvailable.get();
     }
 
+    @VisibleForTesting
+    int getQueueSize() {
+        return decodingQueue.size();
+    }
+
     void add(ReadPartitionDecoder.EncodedMessage task) {
         decodingQueue.add(task);
+
+        if (isStopped) { // decoder may be stopped concurrently
+            decodingQueue.clear();
+        }
     }
 
     void free(long bufferSize) {

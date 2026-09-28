@@ -3,6 +3,7 @@ package tech.ydb.topic.read.impl;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.google.common.annotations.VisibleForTesting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,6 +53,21 @@ public class DeferredCommitterImpl implements DeferredCommitter {
     public void commit() {
         rangesBySession.forEach((committer, ranges) -> {
             committer.commitRanges(ranges.getRangesAndClear());
+
+            if (isStopped(committer)) {
+                // Ranges of a stopped partition session can't be committed anymore, so it is safe to lose a range
+                // added concurrently. Removing the committer allows the stopped read session to be garbage collected
+                rangesBySession.remove(committer, ranges);
+            }
         });
+    }
+
+    @VisibleForTesting
+    int getCommittersCount() {
+        return rangesBySession.size();
+    }
+
+    private static boolean isStopped(MessageCommitter committer) {
+        return committer instanceof ReadPartitionCommitter && ((ReadPartitionCommitter) committer).isStopped();
     }
 }
